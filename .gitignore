@@ -1,0 +1,39 @@
+# Secrets and environment configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases and database backups
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql
+
+# Uploaded user files
+uploads/
+
+# Local backups
+backups/
+
+# Build and editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Flutter (when we add it later)
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.m4a
