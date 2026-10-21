@@ -1,5 +1,5 @@
 
-from datetime import datetime
+from datetime import datetime,timezone
 
 from sqlalchemy import (
     Boolean,
@@ -12,7 +12,6 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
-
 from backend.database import Base
 
 
@@ -71,6 +70,18 @@ class Complaint(Base):
     asset_id: Mapped[int | None] = mapped_column(
         ForeignKey("assets.id"), nullable=True
     )
+    citizen_id: Mapped[int | None] = mapped_column(
+    ForeignKey("users.id", ondelete="SET NULL"),
+    nullable=True,
+    index=True,
+    )
+
+    assigned_worker_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     latitude: Mapped[float | None] = mapped_column(
         Float, nullable=True
     )
@@ -84,6 +95,10 @@ class Complaint(Base):
     asset: Mapped["Asset | None"] = relationship(back_populates="complaints")
     interventions: Mapped[list["Intervention"]] = relationship(
         back_populates="complaint"
+    )
+    citizen: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[citizen_id],
     )
     feedback: Mapped[list["Feedback"]] = relationship(
         back_populates="complaint"
@@ -194,6 +209,42 @@ class AdminDecision(Base):
         String(150), nullable=False
     )
     notes: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, index=True
+    )
+    full_name: Mapped[str] = mapped_column(
+        String(150), nullable=False
+    )
+    email: Mapped[str] = mapped_column(
+        String(255), unique=True, index=True, nullable=False
+    )
+    phone: Mapped[str | None] = mapped_column(
+        String(20), unique=True, nullable=True
+    )
+    password_hash: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    role: Mapped[str] = mapped_column(
+        String(20), default="citizen", nullable=False
+    )
+    phone_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    identity_status: Mapped[str] = mapped_column(
+        String(20), default="unverified", nullable=False
+    )
+    verification_method: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )

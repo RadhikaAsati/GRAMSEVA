@@ -1,5 +1,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
+from backend.app.api.dependencies import require_roles
+from backend.app.api.auth import get_current_user
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -40,8 +42,16 @@ class AssetResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.post("/", response_model=AssetResponse, status_code=201)
-def create_asset(payload: AssetCreate, db: Session = Depends(get_db)):
+@router.post(
+    "/",
+    response_model=AssetResponse,
+    status_code=201,
+)
+def create_asset(
+    payload: AssetCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_roles("admin", "worker")),
+):
     asset = Asset(**payload.model_dump())
     db.add(asset)
     db.commit()

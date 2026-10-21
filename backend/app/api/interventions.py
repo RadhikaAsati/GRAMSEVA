@@ -5,20 +5,22 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from backend.app.api.dependencies import require_roles
 from backend.app.database import get_db
-from backend.app.models import Complaint, Intervention
+from backend.app.api.complaints import get_accessible_complaint
+from backend.app.models import Complaint, Intervention, User
 
 router = APIRouter(
     prefix="/interventions",
     tags=["Interventions"],
+    dependencies=[Depends(require_roles("admin", "worker"))],
 )
 
 
 class InterventionCreate(BaseModel):
-    complaint_id: int
-    action_taken: str = Field(min_length=1)
-    performed_by: str = Field(min_length=1, max_length=150)
-    notes: str | None = None
+    complaint_id: int = Field(gt=0)
+    action_taken: str = Field(min_length=1, max_length=5000)
+    notes: str | None = Field(default=None, max_length=5000)
 
 
 class InterventionResponse(BaseModel):
@@ -36,17 +38,20 @@ class InterventionResponse(BaseModel):
 def create_intervention(
     payload: InterventionCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "worker")),
 ):
-    complaint = db.get(Complaint, payload.complaint_id)
+    complaint = get_accessible_complaint(
+        payload.complaint_id,
+        db,
+        current_user,
+    )
 
-    if complaint is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint not found",
-        )
-
-
-    intervention = Intervention(**payload.model_dump())
+    intervention = Intervention(
+        complaint_id=complaint.id,
+        action_taken=payload.action_taken,
+        performed_by=current_user.full_name,
+        notes=payload.notes,
+    )
     complaint.status = "awaiting_feedback"
 
     try:
@@ -54,16 +59,16 @@ def create_intervention(
         db.add(complaint)
         db.commit()
         db.refresh(intervention)
+        return intervention
     except Exception:
         db.rollback()
         raise
 
-    return intervention
-
-
-
 @router.get("/", response_model=list[InterventionResponse])
-def list_interventions(db: Session = Depends(get_db)):
+def list_interventions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("admin")),
+):
     return db.query(Intervention).order_by(Intervention.id).all()
 
 
@@ -71,6 +76,7 @@ def list_interventions(db: Session = Depends(get_db)):
 def get_intervention(
     intervention_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "worker")),
 ):
     intervention = db.get(Intervention, intervention_id)
 
@@ -79,5 +85,11 @@ def get_intervention(
             status_code=404,
             detail="Intervention not found",
         )
+
+    get_accessible_complaint(
+        intervention.complaint_id,
+        db,
+        current_user,
+    )
 
     return intervention

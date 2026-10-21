@@ -1,23 +1,115 @@
 
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
-
-from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
+from backend.app.api.auth import get_current_user
 from backend.app.database import get_db
-from backend.app.models import Asset, Complaint, ComplaintAttachment
+from backend.app.models import (
+    Asset,
+    Complaint,
+    ComplaintAttachment,
+    User,
+)
+from backend.app.services.asset_matching import match_assets
 from backend.app.services.file_storage import (
     MAX_IMAGE_SIZE,
-    store_complaint_photo,
     delete_stored_photo,
+    store_complaint_photo,
 )
 from backend.app.services.translation import translate_to_english
-from backend.app.services.asset_matching import match_assets
+from backend.app.services.file_storage import (
+    COMPLAINT_PHOTO_DIR,
+    MAX_IMAGE_SIZE,
+    delete_stored_photo,
+    store_complaint_photo,
+)
 
-router = APIRouter(prefix="/complaints", tags=["Complaints"])
+router = APIRouter(
+    prefix="/complaints",
+    tags=["Complaints"],
+    dependencies=[Depends(get_current_user)],
+)
 
+
+# ---------------------------------------------------------
+# Authorization helpers
+# ---------------------------------------------------------
+
+def ensure_complaint_access(
+    complaint: Complaint,
+    current_user: User,
+) -> None:
+    """Enforce complaint access by role, ownership, and assignment."""
+
+    role = (current_user.role or "").strip().lower()
+
+    if role == "admin":
+        return
+
+    if role == "worker":
+        if complaint.assigned_worker_id == current_user.id:
+            return
+
+        raise HTTPException(
+            status_code=404,
+            detail="Complaint not found",
+        )
+
+    if role == "citizen" and complaint.citizen_id == current_user.id:
+        return
+
+    raise HTTPException(
+        status_code=404,
+        detail="Complaint not found",
+    )
+
+
+def get_accessible_complaint(
+    complaint_id: int,
+    db: Session,
+    current_user: User,
+) -> Complaint:
+    """Fetch a complaint and verify access before using it."""
+
+    complaint = db.get(Complaint, complaint_id)
+
+    if complaint is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Complaint not found",
+        )
+
+    ensure_complaint_access(complaint, current_user)
+    return complaint
+
+
+def ensure_staff_role(current_user: User) -> None:
+    """Restrict staff-only actions to workers and administrators."""
+
+    role = (current_user.role or "").strip().lower()
+
+    if role not in {"admin", "worker"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Worker or administrator permission required.",
+        )
+
+
+# ---------------------------------------------------------
+# Request and response schemas
+# ---------------------------------------------------------
 
 class ComplaintCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
@@ -40,6 +132,7 @@ class ComplaintCreate(BaseModel):
 
 class AssetLinkRequest(BaseModel):
     asset_id: int = Field(gt=0)
+
 
 class ComplaintResponse(BaseModel):
     id: int
@@ -71,11 +164,23 @@ class AttachmentResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
+# ---------------------------------------------------------
+# Create a text complaint
+# ---------------------------------------------------------
+
 @router.post("/", response_model=ComplaintResponse, status_code=201)
 def create_complaint(
     payload: ComplaintCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    if (current_user.role or "").strip().lower() != "citizen":
+        raise HTTPException(
+            status_code=403,
+            detail="Only citizens can submit complaints through this endpoint.",
+        )
+
     if payload.asset_id is not None:
         asset = db.get(Asset, payload.asset_id)
 
@@ -92,6 +197,10 @@ def create_complaint(
             )
 
     complaint_data = payload.model_dump()
+
+    # Never accept ownership from the request body.
+    complaint_data["citizen_id"] = current_user.id
+
     original_text = payload.description
 
     if payload.original_language == "en":
@@ -126,25 +235,54 @@ def create_complaint(
 
     return complaint
 
-@router.get("/", response_model=list[ComplaintResponse])
-def list_complaints(db: Session = Depends(get_db)):
-    return db.query(Complaint).order_by(Complaint.id).all()
 
+# ---------------------------------------------------------
+# List complaints visible to the current user
+# ---------------------------------------------------------
+
+@router.get("/", response_model=list[ComplaintResponse])
+def list_complaints(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    role = (current_user.role or "").strip().lower()
+
+    query = db.query(Complaint)
+
+    if role == "citizen":
+        query = query.filter(Complaint.citizen_id == current_user.id)
+    elif role == "worker":
+        query = query.filter(
+            Complaint.assigned_worker_id == current_user.id
+        )
+    elif role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to view complaints.",
+        )
+
+    return query.order_by(Complaint.id).all()
+
+# ---------------------------------------------------------
+# Get one complaint
+# ---------------------------------------------------------
 
 @router.get("/{complaint_id}", response_model=ComplaintResponse)
 def get_complaint(
     complaint_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    complaint = db.get(Complaint, complaint_id)
+    return get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
 
-    if complaint is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint not found",
-        )
 
-    return complaint
+# ---------------------------------------------------------
+# Upload a complaint photo
+# ---------------------------------------------------------
 
 @router.post(
     "/{complaint_id}/attachments",
@@ -156,14 +294,13 @@ async def upload_complaint_photo(
     image: UploadFile = File(...),
     description: str | None = Form(default=None, max_length=1000),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    complaint = db.get(Complaint, complaint_id)
-
-    if complaint is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint not found",
-        )
+    complaint = get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
 
     try:
         image_bytes = await image.read(MAX_IMAGE_SIZE + 1)
@@ -206,6 +343,12 @@ async def upload_complaint_photo(
         raise
 
     return attachment
+
+
+# ---------------------------------------------------------
+# List photos for a complaint
+# ---------------------------------------------------------
+
 @router.get(
     "/{complaint_id}/attachments",
     response_model=list[AttachmentResponse],
@@ -213,44 +356,186 @@ async def upload_complaint_photo(
 def list_complaint_photos(
     complaint_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    complaint = db.get(Complaint, complaint_id)
+    get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
 
-    if complaint is None:
+    attachments = (
+    db.query(ComplaintAttachment)
+    .filter(ComplaintAttachment.complaint_id == complaint_id)
+    .order_by(ComplaintAttachment.id)
+    .all()
+    )
+    return [attachment_response(item) for item in attachments]
+# ---------------------------------------------------------
+# Securely retrieve a complaint photo
+# ---------------------------------------------------------
+
+@router.get(
+    "/{complaint_id}/attachments/{attachment_id}/photo",
+    response_class=FileResponse,
+)
+def get_complaint_photo(
+    complaint_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Verify the user may access this complaint.
+    get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
+
+    # Ensure the attachment belongs to this complaint.
+    attachment = (
+        db.query(ComplaintAttachment)
+        .filter(
+            ComplaintAttachment.id == attachment_id,
+            ComplaintAttachment.complaint_id == complaint_id,
+        )
+        .first()
+    )
+
+    if attachment is None:
         raise HTTPException(
             status_code=404,
-            detail="Complaint not found",
+            detail="Photo not found",
         )
 
-    return (
-        db.query(ComplaintAttachment)
-        .filter(ComplaintAttachment.complaint_id == complaint_id)
-        .order_by(ComplaintAttachment.id)
-        .all()
+    # Accept only the expected legacy storage URL format.
+    prefix = "/uploads/complaint_photos/"
+    if not attachment.file_url.startswith(prefix):
+        raise HTTPException(
+            status_code=404,
+            detail="Photo not found",
+        )
+
+    stored_filename = attachment.file_url[len(prefix):]
+
+    # Filenames created by the storage service are UUIDs with an
+    # approved image extension. Reject path separators and traversal.
+    if (
+        not stored_filename
+        or Path(stored_filename).name != stored_filename
+        or "/" in stored_filename
+        or "\\" in stored_filename
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Photo not found",
+        )
+
+    allowed_types = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+
+    expected_extension = allowed_types.get(attachment.content_type)
+    if (
+        expected_extension is None
+        or not stored_filename.endswith(expected_extension)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Photo not found",
+        )
+
+    photo_path = COMPLAINT_PHOTO_DIR / stored_filename
+
+    try:
+        photo_path.resolve().relative_to(
+            COMPLAINT_PHOTO_DIR.resolve()
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail="Photo not found",
+        )
+
+    if not photo_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Photo not found",
+        )
+
+    return FileResponse(
+        path=photo_path,
+        media_type=attachment.content_type,
+        filename=attachment.original_filename,
+        content_disposition_type="inline",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
+def attachment_response(
+    attachment: ComplaintAttachment,
+) -> AttachmentResponse:
+    return AttachmentResponse(
+        id=attachment.id,
+        complaint_id=attachment.complaint_id,
+        file_url=(
+            f"/complaints/{attachment.complaint_id}"
+            f"/attachments/{attachment.id}/photo"
+        ),
+        original_filename=attachment.original_filename,
+        content_type=attachment.content_type,
+        file_size=attachment.file_size,
+        description=attachment.description,
+        created_at=attachment.created_at,
+    )
+
+# ---------------------------------------------------------
+# Suggest matching assets
+# ---------------------------------------------------------
+
 @router.get("/{complaint_id}/asset-candidates")
 def get_asset_candidates(
     complaint_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
+
     try:
         return match_assets(db, complaint_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
 
-@router.post("/{complaint_id}/confirm-asset", response_model=ComplaintResponse)
+
+# ---------------------------------------------------------
+# Confirm an asset link
+# ---------------------------------------------------------
+
+@router.post(
+    "/{complaint_id}/confirm-asset",
+    response_model=ComplaintResponse,
+)
 def confirm_complaint_asset(
     complaint_id: int,
     payload: AssetLinkRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    complaint = db.get(Complaint, complaint_id)
+    # Linking an asset is a staff action, not a citizen action.
+    ensure_staff_role(current_user)
 
-    if complaint is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint not found",
-        )
+    complaint = get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
 
     if complaint.asset_id is not None:
         raise HTTPException(
@@ -284,7 +569,15 @@ def confirm_complaint_asset(
     return complaint
 
 
-@router.post("/voice", response_model=ComplaintResponse, status_code=201)
+# ---------------------------------------------------------
+# Create a voice complaint
+# ---------------------------------------------------------
+
+@router.post(
+    "/voice",
+    response_model=ComplaintResponse,
+    status_code=201,
+)
 async def create_voice_complaint(
     audio_file: UploadFile = File(...),
     category: str = Form(..., min_length=1, max_length=50),
@@ -293,30 +586,52 @@ async def create_voice_complaint(
     asset_id: int | None = Form(default=None),
     latitude: float | None = Form(default=None, ge=-90, le=90),
     longitude: float | None = Form(default=None, ge=-180, le=180),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if (current_user.role or "").strip().lower() != "citizen":
+        raise HTTPException(
+            status_code=403,
+            detail="Only citizens can submit complaints through this endpoint.",
+        )
+
     if (latitude is None) != (longitude is None):
         raise HTTPException(
             status_code=422,
             detail="Provide both latitude and longitude, or leave both empty.",
         )
+
     max_audio_size = 10 * 1024 * 1024
+
     allowed_extensions = {
-        ".wav", ".mp3", ".m4a", ".ogg", ".flac",
-        ".aac", ".aiff", ".webm", ".opus",
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".ogg",
+        ".flac",
+        ".aac",
+        ".aiff",
+        ".webm",
+        ".opus",
     }
 
     filename = audio_file.filename or ""
-    suffix = __import__("pathlib").Path(filename).suffix.lower()
+    suffix = Path(filename).suffix.lower()
 
     if suffix not in allowed_extensions:
+        await audio_file.close()
         raise HTTPException(
             status_code=415,
-            detail="Unsupported audio format. Upload WAV, MP3, M4A, OGG, FLAC, AAC, AIFF, WebM, or Opus.",
+            detail=(
+                "Unsupported audio format. Upload WAV, MP3, M4A, "
+                "OGG, FLAC, AAC, AIFF, WebM, or Opus."
+            ),
         )
 
-    audio_bytes = await audio_file.read(max_audio_size + 1)
-    await audio_file.close()
+    try:
+        audio_bytes = await audio_file.read(max_audio_size + 1)
+    finally:
+        await audio_file.close()
 
     if not audio_bytes:
         raise HTTPException(
@@ -334,7 +649,10 @@ async def create_voice_complaint(
         asset = db.get(Asset, asset_id)
 
         if asset is None:
-            raise HTTPException(status_code=404, detail="Asset not found")
+            raise HTTPException(
+                status_code=404,
+                detail="Asset not found",
+            )
 
         if not asset.is_active:
             raise HTTPException(
@@ -351,12 +669,21 @@ async def create_voice_complaint(
             language=original_language,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
     except Exception as exc:
-        print(f"Voice transcription failed: {type(exc).__name__}: {exc}")
+        print(
+            f"Voice transcription failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
         raise HTTPException(
             status_code=502,
-            detail="Voice transcription failed. Please try again with a clear recording.",
+            detail=(
+                "Voice transcription failed. "
+                "Please try again with a clear recording."
+            ),
         )
 
     complaint_data = {
@@ -369,14 +696,22 @@ async def create_voice_complaint(
         "transcription_status": "completed",
         "latitude": latitude,
         "longitude": longitude,
+        # Link the complaint to the authenticated citizen.
+        "citizen_id": current_user.id,
     }
 
     try:
-        translated = translate_to_english(transcript, original_language)
+        translated = translate_to_english(
+            transcript,
+            original_language,
+        )
         complaint_data["translated_description"] = translated
         complaint_data["translation_status"] = "completed"
     except Exception as exc:
-        print(f"Voice complaint translation failed: {type(exc).__name__}: {exc}")
+        print(
+            f"Voice complaint translation failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
         complaint_data["translated_description"] = None
         complaint_data["translation_status"] = "failed"
 
@@ -392,25 +727,29 @@ async def create_voice_complaint(
 
     return complaint
 
+
+# ---------------------------------------------------------
+# AI complaint understanding
+# ---------------------------------------------------------
+
 @router.post("/{complaint_id}/understand")
 def understand_existing_complaint(
     complaint_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     import hashlib
     import json
 
+    complaint = get_accessible_complaint(
+        complaint_id,
+        db,
+        current_user,
+    )
+
     from backend.app.services.complaint_understanding import (
         understand_complaint,
     )
-
-    complaint = db.get(Complaint, complaint_id)
-
-    if complaint is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint not found",
-        )
 
     source_text = (
         complaint.translated_description
@@ -430,7 +769,6 @@ def understand_existing_complaint(
     ).hexdigest()
 
     analysis_version = "1.0"
-
     saved_analysis = complaint.ai_analysis
 
     if (
@@ -459,7 +797,10 @@ def understand_existing_complaint(
             translated_description=complaint.translated_description,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
     except Exception as exc:
         print(
             f"Complaint understanding failed: "

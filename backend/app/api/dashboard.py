@@ -1,5 +1,6 @@
 
 from fastapi import APIRouter, Depends
+from backend.app.api.dependencies import require_roles
 from sqlalchemy.orm import Session
 
 from backend.app.database import get_db
@@ -7,7 +8,11 @@ from backend.app.models import Asset, Complaint, Intervention
 from backend.app.services.analytics import get_resolution_analytics
 from backend.app.services.recurrence import analyze_recurrence
 
-router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+router = APIRouter(
+    prefix="/dashboard",
+    tags=["Dashboard"],
+    dependencies=[Depends(require_roles("admin", "worker"))],
+)
 
 
 @router.get("/")
