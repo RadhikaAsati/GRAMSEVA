@@ -116,7 +116,7 @@ export default function AdminWorkers({ token }) {
           <p>Manage your field staff and their assignments.</p>
         </div>
         <div className="admin-workers-heading-actions">
-          
+
 
         </div>
       </div>

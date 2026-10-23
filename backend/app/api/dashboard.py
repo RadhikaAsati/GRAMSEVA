@@ -158,4 +158,3 @@ def resolution_analytics(db: Session = Depends(get_db)):
         **analytics,
         "monthly_complaints": monthly_complaints,
     }
-
