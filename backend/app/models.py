@@ -88,6 +88,15 @@ class Complaint(Base):
     longitude: Mapped[float | None] = mapped_column(
         Float, nullable=True
     )
+    village: Mapped[str | None] = mapped_column(
+        String(150), nullable=True
+    )
+    ward: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    landmark: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
@@ -232,6 +241,15 @@ class User(Base):
     )
     role: Mapped[str] = mapped_column(
         String(20), default="citizen", nullable=False
+    )
+    department: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    preferred_language: Mapped[str] = mapped_column(
+    String(5),
+    default="en",
+    server_default="en",
+    nullable=False,
     )
     phone_verified: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False

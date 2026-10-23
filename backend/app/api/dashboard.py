@@ -1,4 +1,5 @@
-
+import calendar
+from datetime import date
 from fastapi import APIRouter, Depends
 from backend.app.api.dependencies import require_roles
 from sqlalchemy.orm import Session
@@ -114,6 +115,47 @@ def get_dashboard(db: Session = Depends(get_db)):
     }
 
 
+
 @router.get("/analytics")
 def resolution_analytics(db: Session = Depends(get_db)):
-    return get_resolution_analytics(db)
+    analytics = get_resolution_analytics(db)
+
+    # Prepare the latest six calendar months, including months with zero complaints.
+    today = date.today()
+    monthly_counts = {}
+
+    for offset in reversed(range(6)):
+        month_index = today.year * 12 + (today.month - 1) - offset
+        year = month_index // 12
+        month = month_index % 12 + 1
+
+        monthly_counts[(year, month)] = 0
+
+    # Count actual complaints by their creation month.
+    complaint_dates = (
+        db.query(Complaint.created_at)
+        .filter(Complaint.created_at.is_not(None))
+        .all()
+    )
+
+    for (created_at,) in complaint_dates:
+        key = (created_at.year, created_at.month)
+
+        if key in monthly_counts:
+            monthly_counts[key] += 1
+
+    monthly_complaints = [
+        {
+            "month": calendar.month_abbr[month],
+            "year": year,
+            "count": count,
+        }
+        for (year, month), count in monthly_counts.items()
+    ]
+
+    # Preserve all existing resolution analytics and add the trend data.
+    return {
+        **analytics,
+        "monthly_complaints": monthly_complaints,
+    }
+

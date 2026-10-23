@@ -46,12 +46,13 @@ class LoginRequest(BaseModel):
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: int
     full_name: str
     email: EmailStr
     phone: str | None
     role: str
+    department: str | None = None
+    preferred_language: str = "en"
     phone_verified: bool
     identity_status: str
     is_active: bool

@@ -1,4 +1,6 @@
+import logging
 
+logger = logging.getLogger(__name__)
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -28,13 +30,35 @@ from backend.app.services.file_storage import (
     delete_stored_photo,
     store_complaint_photo,
 )
-from backend.app.services.translation import translate_to_english
+from backend.app.services.translation import (
+    translate_text,
+    translate_to_english,
+)
 from backend.app.services.file_storage import (
     COMPLAINT_PHOTO_DIR,
     MAX_IMAGE_SIZE,
     delete_stored_photo,
     store_complaint_photo,
 )
+
+
+class ComplaintTranslationRequest(BaseModel):
+    target_language: Literal["en", "hi", "mr"]
+
+
+class ComplaintTranslationResponse(BaseModel):
+    complaint_id: int
+    original_language: str
+    original_description: str
+    target_language: str
+    translation: str
+
+
+class ComplaintDraftUnderstandingRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=10000)
+    category: str = Field(min_length=1, max_length=50)
+    original_language: Literal["mr", "hi", "en"] = "en"
 
 router = APIRouter(
     prefix="/complaints",
@@ -120,6 +144,9 @@ class ComplaintCreate(BaseModel):
     input_method: Literal["text", "voice"] = "text"
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    village: str | None = Field(default=None, max_length=150)
+    ward: str | None = Field(default=None, max_length=100)
+    landmark: str | None = Field(default=None, max_length=255)
 
     @model_validator(mode="after")
     def validate_coordinates(self):
@@ -143,6 +170,9 @@ class ComplaintResponse(BaseModel):
     asset_id: int | None
     latitude: float | None = None
     longitude: float | None = None
+    village: str | None = None
+    ward: str | None = None
+    landmark: str | None = None
     created_at: datetime
     original_language: str = "en"
     translated_description: str | None = None
@@ -266,7 +296,45 @@ def list_complaints(
 # ---------------------------------------------------------
 # Get one complaint
 # ---------------------------------------------------------
+@router.post("/draft/understand")
+def understand_complaint_draft(
+    payload: ComplaintDraftUnderstandingRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze an unsaved complaint draft without writing to the database."""
 
+    if (current_user.role or "").strip().lower() != "citizen":
+        raise HTTPException(
+            status_code=403,
+            detail="Only citizens can analyze a complaint draft.",
+        )
+
+    from backend.app.services.complaint_understanding import (
+        understand_complaint,
+    )
+
+    try:
+        result = understand_complaint(
+            title=payload.title.strip() or "Untitled complaint",
+            description=payload.description.strip(),
+            category=payload.category,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("Draft complaint understanding failed")
+        raise HTTPException(
+            status_code=502,
+            detail="AI understanding is temporarily unavailable. You can still submit your complaint.",
+    )
+
+    if result.get("missing_information"):
+        result["needs_human_review"] = True
+
+    return {
+        "analysis": result,
+        "saved_to_database": False,
+    }
 @router.get("/{complaint_id}", response_model=ComplaintResponse)
 def get_complaint(
     complaint_id: int,
@@ -278,7 +346,58 @@ def get_complaint(
         db,
         current_user,
     )
+@router.post(
+    "/{complaint_id}/translate",
+    response_model=ComplaintTranslationResponse,
+)
+def translate_complaint(
+    complaint_id: int,
+    payload: ComplaintTranslationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Translate a complaint without modifying its stored text."""
 
+    complaint = get_accessible_complaint(
+        complaint_id=complaint_id,
+        db=db,
+        current_user=current_user,
+    )
+
+    original_description = complaint.description
+    original_language = complaint.original_language or "en"
+
+    try:
+        translated_text = translate_text(
+            text=original_description,
+            source_language=original_language,
+            target_language=payload.target_language,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception(
+            "Complaint translation failed: complaint_id=%s, "
+            "source_language=%s, target_language=%s",
+            complaint_id,
+            original_language,
+            payload.target_language,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Translation is temporarily unavailable. Please try again.",
+        )
+
+    return ComplaintTranslationResponse(
+        complaint_id=complaint.id,
+        original_language=original_language,
+        original_description=original_description,
+        target_language=payload.target_language,
+        translation=translated_text,
+    )
 
 # ---------------------------------------------------------
 # Upload a complaint photo

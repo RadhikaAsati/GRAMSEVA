@@ -37,3 +37,11 @@ backups/
 .packages
 build/
 *.m4a
+
+# Local GRAMSEVA snapshots and temporary source backups
+.gramseva-settings-backup-*/
+mobile_flutter_backup/
+*.before-workers
+*.before-draft-ai
+*.before-issue-location
+*.bak
