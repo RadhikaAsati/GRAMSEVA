@@ -90,6 +90,8 @@ export default function AdminComplaints({ token, initialComplaintId = null, onIn
   const [page, setPage] = useState(1)
   const [selectedComplaint, setSelectedComplaint] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [mapComplaint, setMapComplaint] = useState(null)
+  const [mapLoading, setMapLoading] = useState(false)
 
   const loadComplaints = useCallback(async () => {
     setLoading(true)
@@ -281,6 +283,22 @@ export default function AdminComplaints({ token, initialComplaintId = null, onIn
     currentPage * PAGE_SIZE,
     filteredComplaints.length,
   )
+
+
+  async function openComplaintMap(complaintId) {
+    setMapComplaint(null)
+    setMapLoading(true)
+    setError('')
+
+    try {
+      const result = await getComplaintDetails(token, complaintId)
+      setMapComplaint(result)
+    } catch (err) {
+      setError(err.message || 'Could not load complaint location.')
+    } finally {
+      setMapLoading(false)
+    }
+  }
 
   return (
     <section className="admin-panel admin-all-complaints">
@@ -520,14 +538,39 @@ export default function AdminComplaints({ token, initialComplaintId = null, onIn
                       </td>
 
                       <td>
-                        <button
-                          type="button"
-                          className="admin-complaints-view"
-                          onClick={() => openDetails(item.id)}
-                        >
-                          View <span aria-hidden="true">⌄</span>
-                        </button>
-                      </td>
+  <div className="admin-complaints-actions">
+    <button
+      type="button"
+      className="admin-complaints-view"
+      onClick={() => openDetails(item.id)}
+    >
+      View <span aria-hidden="true">⌄</span>
+    </button>
+
+    <button
+      type="button"
+      className="admin-complaints-map-button"
+      onClick={() => openComplaintMap(item.id)}
+      title={`View map for complaint ${item.id}`}
+      aria-label={`View map for complaint ${item.id}`}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width="17"
+        height="17"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z" />
+        <circle cx="12" cy="10" r="2.5" />
+      </svg>
+    </button>
+  </div>
+</td>
 
                     </tr>
                   )
@@ -668,6 +711,99 @@ export default function AdminComplaints({ token, initialComplaintId = null, onIn
                 </dl>
               </>
             ) : null}
+          </section>
+        </div>
+      )}
+            {mapLoading && (
+        <div className="admin-detail-overlay">
+          <section
+            className="admin-location-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Loading complaint location"
+          >
+            <p>Loading complaint location…</p>
+          </section>
+        </div>
+      )}
+
+      {!mapLoading && mapComplaint && (
+        <div
+          className="admin-detail-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setMapComplaint(null)
+            }
+          }}
+        >
+          <section
+            className="admin-location-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="admin-location-title"
+          >
+            <button
+              type="button"
+              className="admin-detail-close"
+              onClick={() => setMapComplaint(null)}
+              aria-label="Close map"
+            >
+              ×
+            </button>
+
+            <p className="admin-eyebrow">
+              COMPLAINT C-{String(mapComplaint.id).padStart(4, '0')}
+            </p>
+
+            <h2 id="admin-location-title">Complaint Location</h2>
+
+            <p className="admin-location-description">
+              {mapComplaint.title}
+            </p>
+
+            <p className="admin-location-address">
+              {[mapComplaint.landmark, mapComplaint.ward, mapComplaint.village]
+                .filter(Boolean)
+                .join(', ') || 'Location details unavailable'}
+            </p>
+
+            {mapComplaint.latitude != null &&
+            mapComplaint.longitude != null &&
+            Number.isFinite(Number(mapComplaint.latitude)) &&
+            Number.isFinite(Number(mapComplaint.longitude)) &&
+            Math.abs(Number(mapComplaint.latitude)) <= 90 &&
+            Math.abs(Number(mapComplaint.longitude)) <= 180 ? (
+              <>
+                <iframe
+                  className="admin-location-map"
+                  title={`Map for complaint ${mapComplaint.id}`}
+                  src={`https://www.openstreetmap.org/export/embed.html?bbox=${Number(mapComplaint.longitude) - 0.005}%2C${Number(mapComplaint.latitude) - 0.005}%2C${Number(mapComplaint.longitude) + 0.005}%2C${Number(mapComplaint.latitude) + 0.005}&layer=mapnik&marker=${Number(mapComplaint.latitude)}%2C${Number(mapComplaint.longitude)}`}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+
+                <p className="admin-location-coordinates">
+                  {mapComplaint.latitude}, {mapComplaint.longitude}
+                </p>
+
+                <a
+                  className="admin-location-directions"
+                  href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${mapComplaint.latitude},${mapComplaint.longitude}`)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open in Google Maps ↗
+                </a>
+              </>
+            ) : (
+              <div className="admin-location-unavailable">
+                <p>Location coordinates are not available for this complaint.</p>
+                <p>
+                  The map will appear when valid latitude and longitude are
+                  recorded.
+                </p>
+              </div>
+            )}
           </section>
         </div>
       )}

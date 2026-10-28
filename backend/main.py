@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.app.api.preferences import router as preferences_router
 from backend.app.api.languages import router as languages_router
 from backend.app.api.admin_users import router as admin_users_router
+from backend.app.api.worker_voice import router as worker_voice_router
 
 app = FastAPI(
     title="GRAMSEVA API",
@@ -49,6 +50,7 @@ app.include_router(auth_router)
 app.include_router(preferences_router)
 app.include_router(languages_router)
 app.include_router(admin_users_router)
+app.include_router(worker_voice_router)
 
 @app.get("/")
 def home():

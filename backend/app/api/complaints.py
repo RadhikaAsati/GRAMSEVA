@@ -52,10 +52,12 @@ class ComplaintTranslationResponse(BaseModel):
     original_description: str
     target_language: str
     translation: str
+    original_title: str = ""
+    translated_title: str = ""
 
 
 class ComplaintDraftUnderstandingRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="", max_length=200)
     description: str = Field(min_length=1, max_length=10000)
     category: str = Field(min_length=1, max_length=50)
     original_language: Literal["mr", "hi", "en"] = "en"
@@ -168,6 +170,7 @@ class ComplaintResponse(BaseModel):
     category: str
     status: str
     asset_id: int | None
+    assigned_worker_id: int | None = None
     latitude: float | None = None
     longitude: float | None = None
     village: str | None = None
@@ -365,6 +368,7 @@ def translate_complaint(
     )
 
     original_description = complaint.description
+    original_title = complaint.title or ""
     original_language = complaint.original_language or "en"
 
     try:
@@ -372,6 +376,15 @@ def translate_complaint(
             text=original_description,
             source_language=original_language,
             target_language=payload.target_language,
+        )
+        translated_title = (
+            translate_text(
+                text=original_title,
+                source_language=original_language,
+                target_language=payload.target_language,
+            )
+            if original_title.strip()
+            else ""
         )
     except ValueError as exc:
         raise HTTPException(
@@ -397,6 +410,8 @@ def translate_complaint(
         original_description=original_description,
         target_language=payload.target_language,
         translation=translated_text,
+        original_title=original_title,
+        translated_title=translated_title,
     )
 
 # ---------------------------------------------------------

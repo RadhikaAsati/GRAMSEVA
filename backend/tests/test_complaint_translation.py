@@ -22,10 +22,15 @@ def test_translate_own_complaint(client, citizen_factory, complaint_factory, mon
 
     # Avoid making a real Gemini API call in automated tests.
     def fake_translate_text(text, source_language, target_language):
-        assert text == "रस्त्यावरील दिवा बंद आहे."
         assert source_language == "mr"
         assert target_language == "hi"
-        return "सड़क की लाइट बंद है।"
+
+        if text == "रस्त्यावरील दिवा बंद आहे.":
+            return "सड़क की लाइट बंद है।"
+        if text == "Streetlight issue":
+            return "स्ट्रीटलाइट की समस्या"
+
+        raise AssertionError(f"Unexpected translation input: {text}")
 
     monkeypatch.setattr(
         "backend.app.api.complaints.translate_text",

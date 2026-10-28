@@ -1,6 +1,7 @@
-
 import os
 import tempfile
+import time
+import mimetypes
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -13,6 +14,8 @@ LANGUAGE_CODES = {
     "mr": "mr-IN",
     "hi": "hi-IN",
 }
+
+MAX_FILE_WAIT_SECONDS = 60
 
 
 def transcribe_audio(audio_bytes: bytes, suffix: str, language: str) -> str:
@@ -31,8 +34,27 @@ def transcribe_audio(audio_bytes: bytes, suffix: str, language: str) -> str:
         "gemini-3.5-transcribe",
     )
 
+    suffix = suffix.lower()
+    mime_type = mimetypes.guess_type(f"recording{suffix}")[0]
+    if not mime_type:
+        mime_type = {
+            ".webm": "audio/webm",
+            ".m4a": "audio/mp4",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".opus": "audio/opus",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+            ".aiff": "audio/aiff",
+        }.get(suffix)
+
+    if not mime_type or not mime_type.startswith("audio/"):
+        raise ValueError("Unsupported audio format.")
+
     client = genai.Client(api_key=api_key)
     uploaded_file = None
+    temp_path = None
 
     try:
         with tempfile.NamedTemporaryFile(
@@ -42,39 +64,61 @@ def transcribe_audio(audio_bytes: bytes, suffix: str, language: str) -> str:
             temp_file.write(audio_bytes)
             temp_path = temp_file.name
 
-        try:
-            uploaded_file = client.files.upload(file=temp_path)
+        uploaded_file = client.files.upload(file=temp_path)
 
-            interaction = client.interactions.create(
-                model=model,
-                input=[
-                    {
-                        "type": "audio",
-                        "uri": uploaded_file.uri,
-                        "mime_type": uploaded_file.mime_type,
-                    }
-                ],
-                generation_config={
-                    "transcription_config": {
-                        "language_codes": [LANGUAGE_CODES[language]],
-                        "mode": "smart",
-                    }
-                },
-            )
+        # Gemini files can take time to become ACTIVE after upload.
+        deadline = time.monotonic() + MAX_FILE_WAIT_SECONDS
 
-            transcript = (interaction.output_text or "").strip()
+        while True:
+            state = getattr(uploaded_file, "state", None)
+            state_name = getattr(state, "name", str(state or ""))
+            state_name = state_name.rsplit(".", 1)[-1].upper()
 
-            if not transcript:
+            if state_name == "ACTIVE":
+                break
+
+            if state_name in {"FAILED", "ERROR"}:
                 raise RuntimeError(
-                    "The transcription service returned empty text."
+                    f"Gemini audio file processing failed (state={state_name})."
                 )
 
-            return transcript
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Gemini audio file did not become ACTIVE within 60 seconds."
+                )
 
-        finally:
-            Path(temp_path).unlink(missing_ok=True)
+            time.sleep(1)
+            uploaded_file = client.files.get(name=uploaded_file.name)
+
+        interaction = client.interactions.create(
+            model=model,
+            input=[
+                {
+                    "type": "audio",
+                    "uri": uploaded_file.uri,
+                    "mime_type": uploaded_file.mime_type or mime_type,
+                }
+            ],
+            generation_config={
+                "transcription_config": {
+                    "language_codes": [LANGUAGE_CODES[language]],
+                    "mode": "smart",
+                }
+            },
+        )
+
+        transcript = (interaction.output_text or "").strip()
+        if not transcript:
+            raise RuntimeError(
+                "The transcription service returned empty text."
+            )
+
+        return transcript
 
     finally:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+
         if uploaded_file is not None:
             try:
                 client.files.delete(name=uploaded_file.name)

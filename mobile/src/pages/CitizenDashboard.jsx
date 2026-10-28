@@ -1,8 +1,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  createCitizenFeedback,
   createComplaint,
   getComplaints,
+  translateComplaint,
+  getComplaintCaseHistory,
   uploadComplaintPhoto,
   understandComplaintDraft,
 } from '../services/api.js'
@@ -110,6 +113,7 @@ const copy = {
     statusInProgress: 'In Progress',
     statusResolved: 'Resolved',
     statusClosed: 'Closed',
+    statusAwaitingIntervention: 'Awaiting intervention',
   },
   hi: {
     tagline: 'आपका गाँव, आपकी आवाज़',
@@ -196,10 +200,12 @@ const copy = {
     loadError: 'आपकी शिकायतें लोड नहीं हो सकीं।',
     submitError: 'शिकायत दर्ज नहीं हो सकी।',
     dateUnavailable: 'तारीख उपलब्ध नहीं',
-    statusSubmitted: 'दर्ज',
-    statusInProgress: 'प्रगति में',
-    statusResolved: 'हल हुई',
-    statusClosed: 'बंद',
+    statusSubmitted: 'दर्ज की गई',
+    statusInProgress: 'काम जारी है',
+    statusResolved: 'समस्या हल हो गई',
+    statusClosed: 'बंद की गई',
+    statusAwaitingIntervention: 'कारवाईची वाट पाहत आहे',
+    statusAwaitingIntervention: 'कार्रवाई का इंतज़ार है',
   },
   mr: {
     tagline: 'तुमचे गाव, तुमचा आवाज',
@@ -289,8 +295,32 @@ const copy = {
     statusSubmitted: 'नोंदवलेली',
     statusInProgress: 'प्रगतीत',
     statusResolved: 'निकाली',
-    statusClosed: 'बंद',
+    statusClosed: 'बंद की गई',
   },
+}
+
+
+function citizenCategoryLabel(value, language) {
+  const labels = {
+    hi: {
+      Roads: 'सड़क',
+      'Water Supply': 'पानी की सप्लाई',
+      Electricity: 'बिजली',
+      Sanitation: 'सफाई',
+      'Street Lights': 'स्ट्रीट लाइट',
+      Drainage: 'नाली',
+      Other: 'अन्य',
+      streetlight: 'स्ट्रीट लाइट',
+      streetlights: 'स्ट्रीट लाइट',
+      roads: 'सड़क',
+      water: 'पानी',
+      electricity: 'बिजली',
+      sanitation: 'सफाई',
+      drainage: 'नाली',
+    },
+  }
+  return labels[language]?.[String(value || '').trim()]
+    || String(value || 'Other').replace(/\b\w/g, letter => letter.toUpperCase())
 }
 
 function labelStatus(status, t) {
@@ -304,6 +334,7 @@ function labelStatus(status, t) {
   if (normalized === 'in progress') return t.statusInProgress
   if (normalized === 'resolved') return t.statusResolved
   if (normalized === 'closed') return t.statusClosed
+  if (normalized === 'awaiting intervention') return t.statusAwaitingIntervention
 
   return normalized.replace(/\b\w/g, letter => letter.toUpperCase())
 }
@@ -336,7 +367,23 @@ export default function CitizenDashboard({ user, token, onLogout }) {
   const { language, setLanguage, t: sharedT } = useLanguage()
   const tr = copy[language] || copy.en
 
+  const getComplaintDisplay = (complaint, field) => {
+    if (!complaint) return ''
+    const key = `${complaint.id}:${language}`
+    const translated = translatedComplaints[key]
+    if (!translated) return complaint[field] || ''
+    if (field === 'title') {
+      return translated.translated_title || complaint.title || ''
+    }
+    if (field === 'description') {
+      return translated.translation || complaint.description || ''
+    }
+    return complaint[field] || ''
+  }
+
   const [complaints, setComplaints] = useState([])
+  const [translatedComplaints, setTranslatedComplaints] = useState({})
+  const translationCacheRef = useRef(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -345,6 +392,7 @@ export default function CitizenDashboard({ user, token, onLogout }) {
   const [submitting, setSubmitting] = useState(false)
   const [isListening, setIsListening] = useState(false)
   const [aiAnalysis, setAiAnalysis] = useState(null)
+  const [showVoiceReviewDialog, setShowVoiceReviewDialog] = useState(false)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState('')
   const [voiceOrigin, setVoiceOrigin] = useState(false)
@@ -361,7 +409,15 @@ export default function CitizenDashboard({ user, token, onLogout }) {
   })
 
   const [selectedComplaint, setSelectedComplaint] = useState(null)
+  const [caseHistory, setCaseHistory] = useState(null)
+  const [caseHistoryLoading, setCaseHistoryLoading] = useState(false)
+  const [caseHistoryError, setCaseHistoryError] = useState('')
 
+  const [feedbackOutcome, setFeedbackOutcome] = useState('resolved')
+  const [feedbackComments, setFeedbackComments] = useState('')
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [feedbackNotice, setFeedbackNotice] = useState('')
+  const [feedbackError, setFeedbackError] = useState('')
   useEffect(() => {
     if (!photoFile) {
       setPhotoPreview('')
@@ -399,12 +455,70 @@ export default function CitizenDashboard({ user, token, onLogout }) {
   useEffect(() => {
     loadComplaints()
   }, [loadComplaints])
+
+  useEffect(() => {
+    if (!token || !complaints.length) return undefined
+    let cancelled = false
+
+    async function translateLoadedComplaints() {
+      for (const complaint of complaints) {
+        const sourceLanguage = String(
+          complaint.original_language || 'en'
+        ).toLowerCase()
+
+        if (sourceLanguage === language) continue
+
+        const key = `${complaint.id}:${language}`
+        const cached = translationCacheRef.current.get(key)
+
+        if (cached) {
+          if (!cancelled) {
+            setTranslatedComplaints(previous => ({
+              ...previous,
+              [key]: cached,
+            }))
+          }
+          continue
+        }
+
+        try {
+          const result = await translateComplaint(
+            token,
+            complaint.id,
+            language,
+          )
+
+          if (result && (result.translation || result.translated_title)) {
+            translationCacheRef.current.set(key, result)
+            if (!cancelled) {
+              setTranslatedComplaints(previous => ({
+                ...previous,
+                [key]: result,
+              }))
+            }
+          }
+        } catch (err) {
+          // Keep the original complaint visible if translation is unavailable.
+          console.warn(
+            `Translation unavailable for complaint ${complaint.id} (${language}).`,
+            err.message,
+          )
+        }
+
+        if (cancelled) return
+      }
+    }
+
+    translateLoadedComplaints()
+    return () => {
+      cancelled = true
+    }
+  }, [complaints, language, token])
 async function analyzeComplaintDraft() {
-  if (!form.title.trim() || !form.description.trim()) {
-    setAiError('Enter a complaint title and description first.')
+  if (!form.description.trim()) {
+    setAiError('Please describe the issue or record your complaint by voice first.')
     return
   }
-
   setAiLoading(true)
   setAiError('')
   setAiAnalysis(null)
@@ -427,6 +541,85 @@ async function analyzeComplaintDraft() {
     setAiLoading(false)
   }
 }
+
+
+  useEffect(() => {
+  if (!selectedComplaint?.id || !token) {
+    setCaseHistory(null)
+    setCaseHistoryError('')
+    setCaseHistoryLoading(false)
+    return
+  }
+
+  let cancelled = false
+
+  async function loadCaseHistory() {
+    setCaseHistoryLoading(true)
+    setCaseHistoryError('')
+    setCaseHistory(null)
+
+    try {
+      const result = await getComplaintCaseHistory(
+        token,
+        selectedComplaint.id,
+      )
+
+      if (!cancelled) {
+        setCaseHistory(result)
+      }
+    } catch (err) {
+      if (!cancelled) {
+        setCaseHistoryError(
+          err.message || 'Unable to load complaint history.',
+        )
+      }
+    } finally {
+      if (!cancelled) {
+        setCaseHistoryLoading(false)
+      }
+    }
+  }
+
+  loadCaseHistory()
+
+  return () => {
+    cancelled = true
+  }
+}, [selectedComplaint?.id, token])
+  async function submitCitizenFeedback() {
+    if (!selectedComplaint?.id || !token || feedbackSubmitting) return
+
+    setFeedbackSubmitting(true)
+    setFeedbackNotice('')
+    setFeedbackError('')
+
+    try {
+      await createCitizenFeedback(token, {
+        complaint_id: selectedComplaint.id,
+        outcome: feedbackOutcome,
+        comments: feedbackComments.trim() || null,
+      })
+
+      setFeedbackNotice('Thank you! Your feedback has been submitted.')
+      setFeedbackComments('')
+
+      const refreshedHistory = await getComplaintCaseHistory(
+        token,
+        selectedComplaint.id,
+      )
+      setCaseHistory(refreshedHistory)
+
+      // Refresh complaint status because feedback may update it.
+      await loadComplaints()
+    } catch (err) {
+      setFeedbackError(
+        err.message || 'Unable to submit feedback. Please try again.',
+      )
+    } finally {
+      setFeedbackSubmitting(false)
+    }
+  }
+
   async function submitComplaint(event) {
     event.preventDefault()
     setSubmitting(true)
@@ -496,6 +689,23 @@ async function analyzeComplaintDraft() {
   ).length
 
   const openCount = complaints.length - resolvedCount
+  const canSubmitCitizenFeedback = (() => {
+    const interventions = caseHistory?.interventions || []
+    const feedback = caseHistory?.citizen_feedback || []
+
+    if (!interventions.length) return false
+    if (feedback.some((item) => item.outcome === 'resolved')) return false
+    if (!feedback.length) return true
+
+    const latestFeedbackTime = Math.max(
+      ...feedback.map((item) => new Date(item.created_at).getTime()),
+    )
+
+    return interventions.some(
+      (item) => new Date(item.created_at).getTime() > latestFeedbackTime,
+    )
+  })()
+
   const visibleComplaints = activeView === 'My Complaints'
     ? complaints
     : complaints.slice(0, 3)
@@ -553,6 +763,7 @@ async function analyzeComplaintDraft() {
     }
 
     recognition.onresult = event => {
+      console.log('[GRAMSEVA voice] recognition result received', event.results);
       const transcript = event.results?.[0]?.[0]?.transcript?.trim()
 
       if (!transcript) {
@@ -563,16 +774,55 @@ async function analyzeComplaintDraft() {
       setVoiceOrigin(true)
       setAiAnalysis(null)
       setAiError('')
+      setAiLoading(true)
 
       setForm(current => ({
         ...current,
         description: transcript,
-        title: current.title || 'Voice complaint',
+        title: current.title || '',
       }))
 
       setShowForm(true)
       setActiveView('Type a Complaint')
       setNotice(tr.transcript)
+
+      // Automatically analyze the recognized speech using the existing AI API.
+      understandComplaintDraft(token, {
+        title: '',
+        description: transcript,
+        category: form.category,
+        original_language: form.original_language,
+      })
+        .then(result => {
+          const analysis = result?.analysis
+          if (!analysis) {
+            setAiError('The complaint was transcribed, but AI did not return an analysis. You can still edit and submit it.')
+            return
+          }
+
+          setAiAnalysis(analysis)
+          setShowVoiceReviewDialog(true)
+          setForm(current => ({
+            ...current,
+            title: analysis.issue_summary || current.title,
+            category: analysis.suggested_category || current.category,
+            // Preserve the original spoken words in the complaint field.
+            description: transcript,
+          }))
+
+          setIssueDetails(current => ({
+            ...current,
+            village: analysis.village || current.village,
+            ward: analysis.ward || current.ward,
+            landmark: analysis.landmark || current.landmark,
+          }))
+        })
+        .catch(err => {
+          setAiError(
+            err.message || 'AI understanding is unavailable. Your voice transcript is saved in the complaint form.',
+          )
+        })
+        .finally(() => setAiLoading(false))
     }
 
     recognition.onerror = event => {
@@ -791,11 +1041,42 @@ async function analyzeComplaintDraft() {
                       value={form.category}
                       onChange={e => setForm({ ...form, category: e.target.value })}
                     >
-                      {categories.map(item => (
-                        <option key={item.value} value={item.value}>
-                          {categoryLabel(item.value)}
-                        </option>
-                      ))}
+                      {categories.map(item => {
+                        const categoryNames = {
+                          en: {
+                            Roads: 'Roads',
+                            'Water Supply': 'Water Supply',
+                            Electricity: 'Electricity',
+                            Sanitation: 'Sanitation',
+                            'Street Lights': 'Street Lights',
+                            Drainage: 'Drainage',
+                            Other: 'Other',
+                          },
+                          hi: {
+                            Roads: 'सड़क',
+                            'Water Supply': 'पानी की आपूर्ति',
+                            Electricity: 'बिजली',
+                            Sanitation: 'सफाई',
+                            'Street Lights': 'स्ट्रीट लाइट',
+                            Drainage: 'नाली',
+                            Other: 'अन्य',
+                          },
+                          mr: {
+                            Roads: 'रस्ते',
+                            'Water Supply': 'पाणीपुरवठा',
+                            Electricity: 'वीज',
+                            Sanitation: 'स्वच्छता',
+                            'Street Lights': 'पथदिवे',
+                            Drainage: 'गटार',
+                            Other: 'इतर',
+                          },
+                        }
+                        return (
+                          <option key={item.value} value={item.value}>
+                            {(categoryNames[language] || categoryNames.en)[item.value]}
+                          </option>
+                        )
+                      })}
                     </select>
                   </label>
 
@@ -815,21 +1096,84 @@ async function analyzeComplaintDraft() {
                     />
                   </label>
 
-                                    <div className="reference-ai-review">
+                                    {showVoiceReviewDialog && (
+                    <div
+                      role="presentation"
+                      onClick={(event) => {
+                        if (event.target === event.currentTarget) {
+                          setShowVoiceReviewDialog(false)
+                        }
+                      }}
+                      style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 9999,
+                        background: 'rgba(0, 0, 0, 0.55)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '20px',
+                      }}
+                    >
+                      <section
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="voice-review-dialog-title"
+                        style={{
+                          width: '100%',
+                          maxWidth: '440px',
+                          background: 'var(--panel, #ffffff)',
+                          color: 'var(--text, #222222)',
+                          borderRadius: '16px',
+                          padding: '24px',
+                          boxShadow: '0 16px 48px rgba(0,0,0,0.24)',
+                        }}
+                      >
+                        <h2 id="voice-review-dialog-title">
+                          Please review your complaint details
+                        </h2>
+                        <p>
+                          Please check the details carefully and fill in the
+                          location using the text fields or by selecting a
+                          point on the map.
+                        </p>
+                        <button
+                          type="button"
+                          className="reference-primary"
+                          onClick={() => setShowVoiceReviewDialog(false)}
+                          style={{ width: '100%', marginTop: '12px' }}
+                        >
+                          OK
+                        </button>
+                      </section>
+                    </div>
+                  )}
+
+                  <div className="reference-ai-review">
                     <button
                       className="reference-secondary"
                       type="button"
                       onClick={analyzeComplaintDraft}
                       disabled={aiLoading || submitting}
                     >
-                      {aiLoading ? 'Understanding complaint…' : '✨ Understand complaint with AI'}
+                      {aiLoading
+                        ? ({
+                            en: 'Understanding complaint…',
+                            hi: 'शिकायत समझी जा रही है…',
+                            mr: 'तक्रार समजून घेत आहोत…',
+                          }[language] || 'Understanding complaint…')
+                        : ({
+                            en: '✨ Understand complaint with AI',
+                            hi: '✨ AI से शिकायत समझें',
+                            mr: '✨ AI द्वारे तक्रार समजून घ्या',
+                          }[language] || '✨ Understand complaint with AI')}
                     </button>
 
                     {aiError && (
                       <p role="alert">{aiError}</p>
                     )}
 
-                    {aiAnalysis && (
+                    {false && aiAnalysis && (
                       <section aria-live="polite">
                         <h4>AI understanding — please review</h4>
                         <p><strong>Summary:</strong> {aiAnalysis.issue_summary}</p>
@@ -868,7 +1212,11 @@ async function analyzeComplaintDraft() {
 
                   <div className="reference-photo-upload">
                     <label>
-                      Photo (optional, maximum 5 MB)
+                      {({
+                        en: 'Photo (optional, maximum 5 MB)',
+                        hi: 'फोटो (वैकल्पिक, अधिकतम 5 MB)',
+                        mr: 'फोटो (पर्यायी, कमाल 5 MB)',
+                      }[language] || 'Photo (optional, maximum 5 MB)')}
                       <input
                         ref={photoInputRef}
                         type="file"
@@ -1073,17 +1421,17 @@ async function analyzeComplaintDraft() {
                 {tr.complaintId} #{selectedComplaint.id}
               </span>
 
-              <h2>{selectedComplaint.title}</h2>
+              <h2>{getComplaintDisplay(selectedComplaint, 'title')}</h2>
 
               <span className={`reference-status reference-status--${statusClass(selectedComplaint.status)}`}>
                 {labelStatus(selectedComplaint.status, tr)}
               </span>
 
-              <p>{selectedComplaint.description}</p>
+              <p>{getComplaintDisplay(selectedComplaint, 'description')}</p>
 
               <div className="reference-detail-grid">
                 <span>{tr.categoryLabel}</span>
-                <strong>{categoryLabel(selectedComplaint.category)}</strong>
+                <strong>{citizenCategoryLabel(selectedComplaint.category, language)}</strong>
                 <span>{tr.submitted}</span>
                 <strong>{formatDate(selectedComplaint.created_at, language, true)}</strong>
                 <span>{tr.complaintId}</span>
@@ -1094,6 +1442,153 @@ async function analyzeComplaintDraft() {
               <p className="reference-muted">
                 {tr.currentStatus}: {labelStatus(selectedComplaint.status, tr)}
               </p>
+
+              <section className="reference-panel resolution-memory">
+                <h3>Resolution history</h3>
+
+                {caseHistoryLoading && (
+                  <p className="reference-muted">
+                    Loading resolution history…
+                  </p>
+                )}
+
+                {caseHistoryError && (
+                  <p role="alert" className="reference-muted">
+                    {caseHistoryError}
+                  </p>
+                )}
+
+                {!caseHistoryLoading && !caseHistoryError && caseHistory && (
+                  <>
+                    <p>
+                      <strong>Assessment: </strong>
+                      {caseHistory.resolution?.outcome || 'Awaiting assessment'}
+                    </p>
+
+                    <p>
+                      {caseHistory.resolution?.recommendation ||
+                        'No recommendation is available yet.'}
+                    </p>
+
+                    <p>
+                      <strong>Follow-up required: </strong>
+                      {caseHistory.resolution?.requires_follow_up ? 'Yes' : 'No'}
+                    </p>
+
+                    {caseHistory.recurrence?.is_recurring && (
+                      <p className="resolution-memory-warning">
+                        This issue may be recurring. Review the available
+                        history before considering it resolved.
+                      </p>
+                    )}
+
+                    <h4>Interventions</h4>
+
+                    {canSubmitCitizenFeedback ? (
+                      <ul>
+                        {caseHistory.interventions.map((item, index) => (
+                          <li key={item.id ?? `${item.created_at}-${index}`}>
+                            <strong>{item.action_taken}</strong>
+                            {item.created_at && (
+                              <span>
+                                {' '}— {formatDate(item.created_at, language)}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="reference-muted">
+                        No interventions have been recorded yet.
+                      </p>
+                    )}
+
+                    <h4>Your feedback</h4>
+
+                    {caseHistory.citizen_feedback?.length ? (
+                      <ul>
+                        {caseHistory.citizen_feedback.map((item, index) => (
+                          <li key={item.id ?? `${item.created_at}-${index}`}>
+                            {(item.outcome || 'unknown').replaceAll('_', ' ')}
+                            {item.created_at && (
+                              <span>
+                                {' '}— {formatDate(item.created_at, language)}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="reference-muted">
+                        No feedback has been recorded yet.
+                      </p>
+                    )}
+
+                    {canSubmitCitizenFeedback ? (
+                    <div className="citizen-feedback-form">
+                      <h4>Share feedback on this complaint</h4>
+                      <p className="reference-muted">
+                        Tell us whether the issue has been resolved. Your response
+                        may affect the complaint's follow-up status.
+                      </p>
+
+                      <label htmlFor="citizen-feedback-outcome">
+                        Resolution outcome
+                      </label>
+                      <select
+                        id="citizen-feedback-outcome"
+                        value={feedbackOutcome}
+                        onChange={(event) => setFeedbackOutcome(event.target.value)}
+                        disabled={feedbackSubmitting}
+                      >
+                        <option value="resolved">Resolved</option>
+                        <option value="partially_solved">Partially solved</option>
+                        <option value="not_solved">Not solved</option>
+                      </select>
+
+                      <label htmlFor="citizen-feedback-comments">
+                        Comments (optional)
+                      </label>
+                      <textarea
+                        id="citizen-feedback-comments"
+                        value={feedbackComments}
+                        onChange={(event) => setFeedbackComments(event.target.value)}
+                        maxLength={5000}
+                        rows={4}
+                        placeholder="Describe your experience or any work that remains..."
+                        disabled={feedbackSubmitting}
+                      />
+
+                      {feedbackNotice && (
+                        <p role="status" className="reference-muted">
+                          {feedbackNotice}
+                        </p>
+                      )}
+                      {feedbackError && (
+                        <p role="alert" className="reference-muted">
+                          {feedbackError}
+                        </p>
+                      )}
+
+                      <button
+                        type="button"
+                        className="reference-primary"
+                        onClick={submitCitizenFeedback}
+                        disabled={feedbackSubmitting || caseHistoryLoading}
+                      >
+                        {feedbackSubmitting ? 'Submitting feedback…' : 'Submit feedback'}
+                      </button>
+                    </div>
+                    ) : (
+                      <p className="reference-muted">
+                        {caseHistory.citizen_feedback?.some((item) => item.outcome === 'resolved')
+                          ? 'This complaint has been marked resolved. Feedback is closed.'
+                          : 'You can submit feedback after a worker records new work on this complaint.'}
+                      </p>
+                    )}
+                  </>
+                )}
+              </section>
             </section>
           )}
 
@@ -1162,14 +1657,14 @@ async function analyzeComplaintDraft() {
                       <span className="reference-complaint-symbol">⌖</span>
 
                       <span className="reference-complaint-info">
-                        <strong>{item.title}</strong>
+                        <strong>{getComplaintDisplay(item, 'title')}</strong>
                         <small>
-                          {categoryLabel(item.category)} · #{item.id} ·{' '}
+                          {citizenCategoryLabel(item.category, language)} · #{item.id} ·{' '}
                           {item.created_at
                             ? formatDate(item.created_at, language)
                             : tr.dateUnavailable}
                         </small>
-                        <span>{item.description}</span>
+                        <span>{getComplaintDisplay(item, 'description')}</span>
                       </span>
 
                       <span className={`reference-status reference-status--${statusClass(item.status)}`}>
@@ -1222,7 +1717,7 @@ async function analyzeComplaintDraft() {
               >
                 <span className="reference-update-dot" />
                 <span>
-                  <strong>{item.title}</strong>
+                  <strong>{getComplaintDisplay(item, 'title')}</strong>
                   <small>{labelStatus(item.status, tr)} · #{item.id}</small>
                 </span>
               </button>

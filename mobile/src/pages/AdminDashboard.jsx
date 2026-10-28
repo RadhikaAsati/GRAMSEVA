@@ -10,6 +10,7 @@ import {
 import AdminComplaints from './AdminComplaints.jsx'
 import AdminWorkers from './AdminWorkers.jsx'
 import AssignTask from './AssignTask.jsx'
+import AdminTaskTracking from './AdminTaskTracking.jsx'
 import AdminComplaintMap from './AdminComplaintMap.jsx'
 
 const GREEN = '#356849'
@@ -18,6 +19,7 @@ const NAV_ITEMS = [
   { id: 'dashboard', labelKey: 'adminDashboard', icon: '⌂' },
   { id: 'complaints', labelKey: 'adminComplaints', icon: '▤' },
   { id: 'assignments', labelKey: 'adminAssignTask', icon: '✓' },
+  { id: 'taskTracking', labelKey: 'adminTaskTracking', icon: '▣' },
   { id: 'workers', labelKey: 'adminWorkers', icon: '♙' },
   { id: 'analytics', labelKey: 'adminAnalytics', icon: '▥' },
   { id: 'map', labelKey: 'adminMap', icon: '⌖' },
@@ -506,7 +508,9 @@ export default function AdminDashboard({ user, token, onLogout }) {
                       ? t('adminWorkers')
                       : activeSection === 'assignments'
                         ? t('adminAssignTask')
-                        : activeSection === 'analytics'
+                        : activeSection === 'taskTracking'
+                          ? t('adminTaskTracking')
+                          : activeSection === 'analytics'
                           ? t('adminAnalytics')
                           : activeSection === 'map'
                             ? t('adminMap')
@@ -613,6 +617,8 @@ export default function AdminDashboard({ user, token, onLogout }) {
                 </section>
               ) : activeSection === 'map' ? (
                 <AdminComplaintMap complaints={mapComplaints} onViewComplaint={openComplaintFromMap} />
+              ) : activeSection === 'taskTracking' ? (
+                <AdminTaskTracking token={token} />
               ) : activeSection === 'assignments' ? (
                 <AssignTask token={token} />
               ) : activeSection === 'settings' ? (

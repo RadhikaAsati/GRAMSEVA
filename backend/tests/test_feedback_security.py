@@ -1,6 +1,6 @@
 
 from backend.app.api.auth import get_current_user
-from backend.app.models import Feedback, Complaint
+from backend.app.models import Feedback, Complaint, Intervention
 from backend.tests.test_staff_permissions import authenticate_as
 
 
@@ -14,6 +14,16 @@ def test_citizen_can_submit_feedback_for_own_complaint(
 ):
     citizen = user_factory(301, "feedback301@example.test", "citizen")
     complaint = complaint_factory(citizen.id, "My feedback test")
+
+    intervention = Intervention(
+        complaint_id=complaint.id,
+        action_taken="Test repair completed",
+        performed_by="Test worker",
+        notes="Work recorded for feedback test",
+    )
+    test_db.add(intervention)
+    test_db.commit()
+
     authenticate_as(client, citizen)
 
     response = client.post(

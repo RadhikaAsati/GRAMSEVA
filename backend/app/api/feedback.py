@@ -73,6 +73,40 @@ def create_feedback(
             detail="Complaint not found",
         )
 
+    # Citizens can review the outcome only after work is recorded.
+    if not complaint.interventions:
+        raise HTTPException(
+            status_code=409,
+            detail="Feedback is available after a worker records work on this complaint.",
+        )
+
+    previous_feedback = sorted(
+        complaint.feedback,
+        key=lambda item: item.created_at,
+    )
+
+    # A complaint marked resolved cannot receive feedback again.
+    if any(item.outcome == "resolved" for item in previous_feedback):
+        raise HTTPException(
+            status_code=409,
+            detail="This complaint has already been marked resolved. No further feedback is allowed.",
+        )
+
+    # For an unresolved outcome, require new worker work before
+    # accepting another feedback submission.
+    if previous_feedback:
+        latest_feedback = previous_feedback[-1]
+        has_new_work = any(
+            intervention.created_at > latest_feedback.created_at
+            for intervention in complaint.interventions
+        )
+
+        if not has_new_work:
+            raise HTTPException(
+                status_code=409,
+                detail="Please wait until a worker records new work before submitting feedback again.",
+            )
+
     feedback = Feedback(
         complaint_id=complaint.id,
         outcome=payload.outcome,

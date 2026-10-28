@@ -48,6 +48,60 @@ def get_case_history(
 
     recurrence = analyze_recurrence(db, complaint)
 
+    # Fallback: show earlier similar complaints when no asset is linked.
+    # Keep the existing asset-based recurrence behavior unchanged.
+    if complaint.asset_id is None:
+        similar_result = find_similar_complaints(
+            db=db,
+            complaint_id=complaint.id,
+            limit=10,
+        )
+
+        historical_cases = []
+        for case in similar_result.get("similar_cases", []):
+            same_category = (
+                str(case.get("category") or "").strip().casefold()
+                == str(complaint.category or "").strip().casefold()
+            )
+            if not same_category or case.get("similarity_score", 0) < 25:
+                continue
+
+            past_feedback = case.get("citizen_feedback", [])
+            latest_feedback = past_feedback[-1] if past_feedback else {}
+
+            historical_cases.append({
+                "complaint_id": case.get("complaint_id"),
+                "title": case.get("title"),
+                "category": case.get("category"),
+                "status": case.get("status"),
+                "latest_citizen_outcome": latest_feedback.get("outcome"),
+                "previous_interventions": [
+                    {
+                        **work,
+                        "intervention_id": work.get("id"),
+                    }
+                    for work in case.get("interventions", [])
+                ],
+                "similarity_score": case.get("similarity_score"),
+                "match_reasons": case.get("match_reasons", []),
+            })
+
+        if historical_cases:
+            recurrence["historical_complaints"] = historical_cases
+            recurrence["previous_complaint_count"] = len(historical_cases)
+            recurrence["previous_unsolved_count"] = sum(
+                1 for item in historical_cases
+                if item.get("latest_citizen_outcome") == "not_solved"
+            )
+            recurrence["unresolved_previous_count"] = (
+                recurrence["previous_unsolved_count"]
+            )
+            recurrence["is_recurring"] = True
+            recurrence["message"] = (
+                "Earlier similar complaints were found. "
+                "Review their feedback and interventions before acting."
+            )
+
     admin_decisions = (
         db.query(AdminDecision)
         .filter(AdminDecision.complaint_id == complaint.id)
@@ -76,6 +130,26 @@ def get_case_history(
                 else None
             ),
             "created_at": complaint.created_at.isoformat(),
+            "attachments": [
+                {
+                    "id": attachment.id,
+                    "file_url": (
+                        f"/complaints/{complaint.id}"
+                        f"/attachments/{attachment.id}/photo"
+                    ),
+                    "original_filename": attachment.original_filename,
+                    "content_type": attachment.content_type,
+                    "description": attachment.description,
+                    "created_at": attachment.created_at.isoformat(),
+                }
+                for attachment in sorted(
+                    complaint.attachments,
+                    key=lambda item: (item.created_at, item.id),
+                )
+                if attachment.content_type in {
+                    "image/jpeg", "image/png", "image/webp"
+                }
+            ],
         },
         "interventions": [
             {

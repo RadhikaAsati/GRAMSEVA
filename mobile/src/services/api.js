@@ -90,6 +90,14 @@ export function createComplaint(token, complaint) {
   })
 }
 
+export function translateComplaint(token, complaintId, target_language) {
+  return apiRequest(`/complaints/${complaintId}/translate`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ target_language }),
+  })
+}
+
 export function getLanguagePreference(token) {
   return apiRequest('/preferences/language', {
     headers: {
@@ -177,6 +185,14 @@ export function createAdminIntervention(token, intervention) {
   })
 }
 
+export function createWorkerIntervention(token, intervention) {
+  return apiRequest('/interventions/', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(intervention),
+  })
+}
+
 export function getAssets(token) {
   return apiRequest('/assets/', {
     headers: { Authorization: `Bearer ${token}` },
@@ -209,5 +225,34 @@ export function createAdminWorker(token, worker) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(worker),
+  })
+}
+
+export function createCitizenFeedback(token, feedback) {
+  return apiRequest('/feedback/', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(feedback),
+  })
+}
+
+export function getComplaintCaseHistory(token, complaintId) {
+  return apiRequest(`/complaints/${complaintId}/case-history`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function getSimilarCases(token, complaintId, limit = 5) {
+  return apiRequest(
+    `/complaints/${complaintId}/similar-cases?limit=${limit}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  )
+}
+
+export function getComplaintResolution(token, complaintId) {
+  return apiRequest(`/resolution/${complaintId}`, {
+    headers: { Authorization: `Bearer ${token}` },
   })
 }
