@@ -21,6 +21,12 @@ app = FastAPI(
     description="Outcome-Adaptive Civic Service Resolution and Rural E-Governance System",
     version="1.0.0",
 )
+frontend_origins = [
+    origin.strip()
+    for origin in __import__("os").getenv("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -28,6 +34,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+        *frontend_origins,
     ],
     allow_credentials=True,
     allow_methods=["*"],

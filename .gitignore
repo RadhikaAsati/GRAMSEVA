@@ -45,3 +45,20 @@ mobile_flutter_backup/
 *.before-draft-ai
 *.before-issue-location
 *.bak
+
+# Temporary source backups and recovery copies
+*.backup
+*.backup-*
+*.backup-*
+*.before-*
+*.checkpoint-*
+*.recovery-save
+*.feedback-backup
+*.analytics-backup
+
+# Additional timestamped and named backup files
+*.analytics-backup-*
+*.task-screen-backup-*
+*.bg-backup
+*.polish-backup
+*.pre-redesign
